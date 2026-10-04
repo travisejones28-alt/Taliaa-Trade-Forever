@@ -1,0 +1,13 @@
+## Interface: 16001, 120100, 120105
+## Title: Taliaa Trade - Forever Market Prototype
+## Notes: Safe AH scanner + hardened market model for WoW Forever Beta. Three-scan BUY gate, suffix-safe markets, no buying/posting/canceling.
+## Author: Taliaa / OpenAI
+## Version: 0.2.1-beta
+## SavedVariables: TaliaaTradeBetaDB
+## IconTexture: Interface\Icons\INV_Misc_Coin_01
+
+Core.lua
+APIProbe.lua
+MarketModel.lua
+Scanner.lua
+UI.lua
