@@ -1,437 +1,218 @@
-local addonName, TTB = ...
-
-local function makeButton(parent, text, width, callback)
-  local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-  b:SetSize(width or 130, 28)
-  b:SetText(text)
-  b:SetScript("OnClick", callback)
-  return b
+local _,M=...
+local tabs={'market','opportunities','execution','selling','my auctions','ledger','settings','diagnostics'}
+local function label(parent,text,x,y,w,font)
+  local f=parent:CreateFontString(nil,'OVERLAY',font or 'GameFontNormalSmall'); f:SetPoint('TOPLEFT',x,y)
+  if w then f:SetWidth(w) end; f:SetJustifyH('LEFT'); f:SetText(text); return f
 end
-
-local function addLine(lines, text)
-  lines[#lines + 1] = tostring(text or "")
+local function button(parent,text,x,y,w,fn)
+  local b=CreateFrame('Button',nil,parent,'UIPanelButtonTemplate'); b:SetPoint('TOPLEFT',x,y); b:SetSize(w,26); b:SetText(text); b:SetScript('OnClick',fn); return b
 end
-
-local function statusColor(ok)
-  if ok then return "|cff66ff99YES|r" end
-  return "|cffff6666NO|r"
+local function edit(parent,x,y,w,text)
+  local e=CreateFrame('EditBox',nil,parent,'InputBoxTemplate'); e:SetPoint('TOPLEFT',x,y); e:SetSize(w,24); e:SetAutoFocus(false)
+  e:SetText(text or ''); e:SetScript('OnEscapePressed',function(f) f:ClearFocus() end); return e
 end
-
-local function signalColor(signal)
-  if signal == "BUY CANDIDATE" then return "|cff66ff99" end
-  if type(signal) == "string" and string.find(signal, "WATCH", 1, true) then return "|cffffd966" end
-  return "|cffaaaaaa"
+function M:SetView(view)
+  self.view=view; self.page=1; if self.window then self.window:Show() end
+  if view=='selling' then self:RefreshInventory() end; self:RefreshUI()
 end
-
-local function joinText(values)
-  if not values or #values == 0 then return "none" end
-  return table.concat(values, "; ")
-end
-
-function TTB:BuildOpportunitiesText()
-  local lines = {}
-  addLine(lines, "|cffffffffTOP MARKET OPPORTUNITIES|r")
-  addLine(lines, "|cffaaaaaaRead-only model. SAFE MODE calls no buy/post/cancel actions. BUY CANDIDATE cannot appear until at least 3 observations of that exact market variant.|r")
-  addLine(lines, "|cffaaaaaaScoring now weights absolute profit + cheap-depth profit and penalizes thin/outlier markets. Activity remains a snapshot-change proxy, not proven sell-through.|r")
-  addLine(lines, "")
-
-  local scan = self.db and self.db.latestScan
-  if scan then
-    addLine(lines, string.format("Latest scan: %d valid auctions | %d markets | %d quantity | model scan #%s | %d ms",
-      scan.auctionsProcessed or 0, scan.uniqueItems or 0, scan.totalQuantity or 0, tostring(scan.marketScanID or "?"), scan.processingMS or 0))
-  else
-    addLine(lines, "No market snapshot yet. Open the AH and click REQUEST FRESH SCAN.")
-  end
-  addLine(lines, "")
-
-  local opportunities = self:GetTopOpportunities(20)
-  if #opportunities == 0 then
-    addLine(lines, "No WATCH/BUY candidates are stored yet.")
-    addLine(lines, "Run a fresh scan with v0.2.1-beta to populate the hardened model.")
-    return table.concat(lines, "\n")
-  end
-
-  for i, o in ipairs(opportunities) do
-    local c = signalColor(o.signal)
-    local suffixText = (tonumber(o.itemSuffix) or 0) ~= 0 and ("  suffix " .. tostring(o.itemSuffix)) or ""
-    addLine(lines, string.format("%s%02d. %-17s|r  |cffffffff%s|r  |cffaaaaaa[%d]%s|r  Score %d",
-      c, i, tostring(o.signal), tostring(o.name or "Unknown"), tonumber(o.itemID) or 0, suffixText, tonumber(o.score) or 0))
-    addLine(lines, string.format("     Floor %s  ->  Fair %s  |  Advantage %.1f%%  |  Net/unit %s  |  Cheap depth %d for %s  |  Modeled depth net %s",
-      self:Money(o.floor), self:Money(o.fairValue), (tonumber(o.priceAdvantage) or 0) * 100, self:Money(o.estimatedNetUnit), tonumber(o.cheapQuantity) or 0,
-      self:Money(o.cheapCost), self:Money(o.estimatedCheapNet)))
-    addLine(lines, string.format("     Supply %d across %d listings  |  Confidence %s (%d)  |  Activity %s (%d)  |  Obs %d  |  Volatility %.1f%%",
-      tonumber(o.quantity) or 0, tonumber(o.listings) or 0, tostring(o.confidence), tonumber(o.confidenceScore) or 0,
-      tostring(o.activity), tonumber(o.activityScore) or 0, tonumber(o.observations) or 0, (tonumber(o.volatility) or 0) * 100))
-    addLine(lines, "     Why: " .. joinText(o.reasons))
-    addLine(lines, "     Risk: " .. joinText(o.risks))
-    addLine(lines, "")
-  end
-
-  addLine(lines, "Enter any item ID above in the Item ID box and click DETAIL for the full price-depth/history view.")
-  return table.concat(lines, "\n")
-end
-
-function TTB:BuildDatabaseText()
-  local lines = {}
-  addLine(lines, "|cffffffffMARKET DATABASE|r")
-  local stats = self.db and self.db.marketStats
-  local market = self.db and self.db.market or {}
-  if not stats then
-    addLine(lines, "No modeled market database yet. Run one v0.2.1-beta scan.")
-    return table.concat(lines, "\n")
-  end
-
-  addLine(lines, string.format("Stored markets: %d  |  updated last scan: %d  |  WATCH/BUY candidates: %d  |  latest scan ID: %d",
-    stats.storedMarkets or 0, stats.marketsUpdated or 0, stats.opportunities or 0, stats.scanID or 0))
-  addLine(lines, "Each exact market variant keeps up to 30 compact observations. Random-stat suffixes are separated; v0.2.0 unsuffixed history is preserved.")
-  addLine(lines, "")
-
-  local rows = {}
-  for _, m in pairs(market) do
-    if m.latest then rows[#rows + 1] = m end
-  end
-  table.sort(rows, function(a, b)
-    if (a.observations or 0) == (b.observations or 0) then
-      return (a.latest.quantity or 0) > (b.latest.quantity or 0)
-    end
-    return (a.observations or 0) > (b.observations or 0)
-  end)
-
-  addLine(lines, "MOST OBSERVED / LARGEST CURRENT MARKETS")
-  for i = 1, math.min(40, #rows) do
-    local m = rows[i]
-    local suffixText = (tonumber(m.itemSuffix) or 0) ~= 0 and (" s" .. tostring(m.itemSuffix)) or ""
-    addLine(lines, string.format("%2d. %-30s [%d%s]  obs=%d  floor=%s  fair=%s  qty=%d  listings=%d  conf=%s  activity=%s",
-      i, tostring(m.name or "Unknown"), tonumber(m.itemID) or 0, suffixText, tonumber(m.observations) or 0,
-      self:Money(m.latest.floor), self:Money(m.fairValue), tonumber(m.latest.quantity) or 0, tonumber(m.latest.listings) or 0,
-      tostring(m.confidence or "?"), tostring(m.activity or "?")))
-  end
-  return table.concat(lines, "\n")
-end
-
-function TTB:BuildDiagnosticsText()
-  local lines = {}
-  local build = self.db and self.db.currentBuild or self:GetBuildSnapshot()
-  local api = self.db and self.db.api
-
-  addLine(lines, "|cffffffffCLIENT / SAFE MODE|r")
-  addLine(lines, string.format("Addon %s | Client %s | Build %s | Interface %s | WOW_PROJECT_ID %s",
-    tostring(self.version), tostring(build.version), tostring(build.build), tostring(build.tocVersion), tostring(build.projectID)))
-  addLine(lines, string.format("Forever Beta: %s | AH open: %s | SAFE MODE: |cff66ff99ON|r", statusColor(build.isForeverBeta), statusColor(self.ahOpen)))
-  addLine(lines, "Protected buy / bid / post / cancel APIs are presence-probed only. This build calls none of them.")
-  addLine(lines, "")
-
-  addLine(lines, "|cffffffffSCAN STATE|r")
-  addLine(lines, string.format("%s | %d%% | local replicate timer %s", tostring(self.scanState.status), math.floor((self.scanState.progress or 0) * 100 + 0.5), self:FormatDuration(self:GetSecondsUntilFreshScanAllowed())))
-  local scan = self.db and self.db.latestScan
-  if scan then
-    addLine(lines, string.format("Latest: raw=%d valid=%d markets=%d baseItems=%d suffixVariants=%d qty=%d incomplete=%d invalid=%d modelCandidates=%d",
-      scan.rawRows or 0, scan.auctionsProcessed or 0, scan.uniqueItems or 0, scan.uniqueBaseItems or scan.uniqueItems or 0, scan.variantMarkets or 0, scan.totalQuantity or 0,
-      scan.incompleteRecords or 0, scan.invalidRecords or 0, scan.marketOpportunities or 0))
-  end
-  addLine(lines, "")
-
-  addLine(lines, "|cffffffffAPI PROBE|r")
-  if api and api.results then
-    addLine(lines, string.format("Functions present: %d / %d | throttle ready at probe: %s", api.present or 0, api.total or 0, tostring(api.throttleReady)))
-    for _, row in ipairs(api.results) do
-      addLine(lines, string.format("%s %-47s %s", row.present and "|cff66ff99YES|r" or "|cffff6666NO |r", row.path, row.note or ""))
-    end
-  else
-    addLine(lines, "No API probe data.")
-  end
-  addLine(lines, "")
-
-  addLine(lines, "|cffffffffLATEST LIVE QUERY|r")
-  local q = self.db and self.db.latestQuery
-  if q then
-    addLine(lines, string.format("Item %s | type=%s | results=%s | qty=%s | floor=%s | full=%s",
-      tostring(q.itemID), tostring(q.resultType), tostring(q.resultCount), tostring(q.totalQuantity), self:Money(q.floorPrice), tostring(q.hasFullResults)))
-  else
-    addLine(lines, "No live item query completed yet.")
-  end
-  addLine(lines, "")
-
-  addLine(lines, "|cffffffffRECENT LOG|r")
-  local log = self.db and self.db.log or self.runtimeLog
-  local startAt = math.max(1, #log - 24)
-  for i = startAt, #log do
-    local e = log[i]
-    addLine(lines, string.format("[%s] %-11s %s", date("%H:%M:%S", e.at or time()), tostring(e.kind), tostring(e.message)))
-  end
-  return table.concat(lines, "\n")
-end
-
-function TTB:BuildItemDetailText(itemID)
-  local lines = {}
-  local m = self:GetMarket(itemID)
-  addLine(lines, "|cffffffffITEM DETAIL|r")
-  if not m or not m.latest then
-    addLine(lines, "No saved market data for item ID " .. tostring(itemID) .. ".")
-    addLine(lines, "Run a full scan first, or choose an item ID shown in Top 20 / Market DB.")
-    return table.concat(lines, "\n")
-  end
-
-  local o = m.latest
-  local variants = self.GetMarketVariants and self:GetMarketVariants(itemID) or { m }
-  local suffixText = (tonumber(m.itemSuffix) or 0) ~= 0 and ("  |  suffix " .. tostring(m.itemSuffix)) or ""
-  addLine(lines, string.format("|cffffffff%s|r  [%d]%s  |  %s  |  Opportunity score %d", tostring(m.name), tonumber(m.itemID) or 0, suffixText, tostring(m.signal), tonumber(m.opportunityScore) or 0))
-  if #variants > 1 then
-    addLine(lines, string.format("Stored variants for this base item: %d. DETAIL shows the most recently observed variant; Top 20 identifies suffixes explicitly.", #variants))
-  end
-  addLine(lines, "")
-  addLine(lines, "|cffffffffPRICE / DEPTH|r")
-  addLine(lines, string.format("Floor: %s  |  floor qty: %d  |  modeled fair: %s  |  current depth value: %s  |  historical fair: %s",
-    self:Money(o.floor), tonumber(o.floorQuantity) or 0, self:Money(m.fairValue), self:Money(o.depthValue), self:Money(m.historicalFair)))
-  addLine(lines, string.format("Q10 %s  |  Q25 %s  |  Median %s  |  Q75 %s  |  Q90 %s  |  Ceiling %s",
-    self:Money(o.q10), self:Money(o.q25), self:Money(o.median), self:Money(o.q75), self:Money(o.q90), self:Money(o.ceiling)))
-  addLine(lines, string.format("Price advantage: %.1f%%  |  net/unit after 5%% AH cut: %s  |  units <= 82%% of depth value: %d (capital %s)",
-    (tonumber(m.priceAdvantage) or 0) * 100, self:Money(m.estimatedNetUnit), tonumber(o.cheapQuantity) or 0, self:Money(o.cheapCost)))
-  addLine(lines, string.format("Modeled cheap-depth net: %s  |  cheap-depth ROI: %.1f%%  |  BUY history gate: %d/%d observations",
-    self:Money(m.estimatedCheapNet), (tonumber(m.estimatedCheapROI) or 0) * 100, tonumber(m.observations) or 0, tonumber(m.minBuyObservations) or 3))
-  addLine(lines, "")
-
-  addLine(lines, "|cffffffffMODEL / CONFIDENCE|r")
-  addLine(lines, string.format("Observations: %d  |  confidence: %s (%d/100)  |  activity proxy: %s (%d/100)  |  volatility: %.1f%%",
-    tonumber(m.observations) or 0, tostring(m.confidence), tonumber(m.confidenceScore) or 0, tostring(m.activity), tonumber(m.activityScore) or 0, (tonumber(m.volatility) or 0) * 100))
-  addLine(lines, string.format("Fresh-launch/current weight: %.0f%%  |  historical weight: %.0f%%", (tonumber(m.freshLaunchWeight) or 0) * 100, (tonumber(m.historyWeight) or 0) * 100))
-  addLine(lines, string.format("Supply change: %+d (%+.1f%%)  |  median move: %+.1f%%  |  floor move: %+.1f%%",
-    tonumber(m.supplyChange) or 0, (tonumber(m.supplyChangePct) or 0) * 100, (tonumber(m.medianMovePct) or 0) * 100, (tonumber(m.floorMovePct) or 0) * 100))
-  addLine(lines, string.format("Vendor value: %s  |  below vendor: %s  |  thin floor: %s",
-    m.vendorPrice and m.vendorPrice > 0 and self:Money(m.vendorPrice) or "unknown", tostring(m.vendorArbitrage and true or false), tostring(m.thinFloor and true or false)))
-  addLine(lines, "")
-
-  addLine(lines, "|cff66ff99WHY|r  " .. joinText(m.reasons))
-  addLine(lines, "|cffffcc66RISKS|r  " .. joinText(m.risks))
-  addLine(lines, "")
-  addLine(lines, "|cffffffffHISTORY (oldest -> newest, max 30)|r")
-  for i, h in ipairs(m.history or {}) do
-    addLine(lines, string.format("%2d. %s  scan#%s  floor=%s  median=%s  depth=%s  qty=%d  listings=%d  cheap=%d",
-      i, date("%m/%d %H:%M", h.at or time()), tostring(h.scanID or "?"), self:Money(h.floor), self:Money(h.median), self:Money(h.depthValue),
-      tonumber(h.quantity) or 0, tonumber(h.listings) or 0, tonumber(h.cheapQuantity) or 0))
-  end
-  addLine(lines, "")
-  addLine(lines, "Use LIVE QUERY to compare the saved full-scan model with Blizzard's current targeted search result. No purchase is made.")
-  return table.concat(lines, "\n")
-end
-
-function TTB:BuildCurrentViewText()
-  local view = self.currentView or (self.db and self.db.settings and self.db.settings.defaultView) or "opportunities"
-  if view == "database" then return self:BuildDatabaseText() end
-  if view == "diagnostics" then return self:BuildDiagnosticsText() end
-  if view == "detail" then return self:BuildItemDetailText(self.selectedItemID or 0) end
-  return self:BuildOpportunitiesText()
-end
-
-function TTB:SetView(view, silent)
-  self.currentView = view or "opportunities"
-  if self.db and self.db.settings then self.db.settings.defaultView = self.currentView end
-  if self.frame and not silent then self.frame:Show() end
-  self:RefreshUI()
-end
-
-function TTB:ShowItemDetail(itemID)
-  itemID = tonumber(itemID)
-  if not itemID or itemID <= 0 then self:Print("Enter a valid item ID for DETAIL."); return end
-  self.selectedItemID = itemID
-  if self.queryEditBox then self.queryEditBox:SetText(tostring(itemID)) end
-  self:SetView("detail")
-end
-
-function TTB:InitializeUI()
-  if self.frame then return end
-
-  local f = CreateFrame("Frame", "TaliaaTradeBetaFrame", UIParent, "BackdropTemplate")
-  self.frame = f
-  f:SetSize(1080, 720)
-  f:SetPoint("CENTER")
-  f:SetFrameStrata("DIALOG")
-  f:SetClampedToScreen(true)
-  f:SetMovable(true)
-  f:EnableMouse(true)
-  f:RegisterForDrag("LeftButton")
-  f:SetScript("OnDragStart", function(frame) frame:StartMoving() end)
-  f:SetScript("OnDragStop", function(frame) frame:StopMovingOrSizing() end)
-  f:SetBackdrop({
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
-    insets = { left = 11, right = 12, top = 12, bottom = 11 },
-  })
-
-  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  title:SetPoint("TOPLEFT", 22, -18)
-  title:SetText("TALIAA TRADE — FOREVER MARKET PROTOTYPE")
-
-  local safe = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  safe:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -5)
-  safe:SetText("|cff66ff99SAFE MODE ON|r — scan/database/model only; zero buy / post / cancel calls")
-
-  local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-  close:SetPoint("TOPRIGHT", -7, -7)
-
-  local top = makeButton(f, "TOP 20", 90, function() TTB:SetView("opportunities") end)
-  top:SetPoint("TOPLEFT", 22, -68)
-  local db = makeButton(f, "MARKET DB", 100, function() TTB:SetView("database") end)
-  db:SetPoint("LEFT", top, "RIGHT", 7, 0)
-  local diag = makeButton(f, "DIAGNOSTICS", 110, function() TTB:SetView("diagnostics") end)
-  diag:SetPoint("LEFT", db, "RIGHT", 7, 0)
-
-  local fresh = makeButton(f, "REQUEST FRESH SCAN", 160, function() TTB:RequestFreshScan() end)
-  fresh:SetPoint("LEFT", diag, "RIGHT", 20, 0)
-  self.freshScanButton = fresh
-  local cached = makeButton(f, "ANALYZE CACHED", 135, function() TTB:AnalyzeCachedSnapshot() end)
-  cached:SetPoint("LEFT", fresh, "RIGHT", 7, 0)
-  local report = makeButton(f, "COPY REPORT", 115, function() TTB:ShowReport() end)
-  report:SetPoint("LEFT", cached, "RIGHT", 7, 0)
-
-  local queryLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  queryLabel:SetPoint("TOPLEFT", 22, -108)
-  queryLabel:SetText("Item ID:")
-
-  local edit = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
-  self.queryEditBox = edit
-  edit:SetSize(110, 28)
-  edit:SetPoint("LEFT", queryLabel, "RIGHT", 10, 0)
-  edit:SetAutoFocus(false)
-  edit:SetNumeric(true)
-  edit:SetMaxLetters(10)
-
-  local detail = makeButton(f, "DETAIL", 85, function() TTB:ShowItemDetail(edit:GetText()) end)
-  detail:SetPoint("LEFT", edit, "RIGHT", 8, 0)
-  local live = makeButton(f, "LIVE QUERY", 105, function() TTB:RequestItemQuery(edit:GetText()) end)
-  live:SetPoint("LEFT", detail, "RIGHT", 8, 0)
-  local probe = makeButton(f, "REFRESH API PROBE", 145, function() TTB:RunAPIProbe(); TTB:SetView("diagnostics") end)
-  probe:SetPoint("LEFT", live, "RIGHT", 8, 0)
-
-  local queryHelp = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  queryHelp:SetPoint("LEFT", probe, "RIGHT", 10, 0)
-  queryHelp:SetText("DETAIL uses saved DB. LIVE QUERY asks Blizzard for current results; it never buys.")
-
-  local scanStatus = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  self.scanStatusText = scanStatus
-  scanStatus:SetPoint("TOPLEFT", 22, -145)
-  scanStatus:SetWidth(1020)
-  scanStatus:SetJustifyH("LEFT")
-
-  local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-  self.scroll = scroll
-  scroll:SetPoint("TOPLEFT", 22, -171)
-  scroll:SetPoint("BOTTOMRIGHT", -42, 22)
-
-  local child = CreateFrame("Frame", nil, scroll)
-  self.scrollChild = child
-  child:SetSize(980, 1600)
-  scroll:SetScrollChild(child)
-
-  local body = child:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  self.bodyText = body
-  body:SetPoint("TOPLEFT", 2, -2)
-  body:SetWidth(970)
-  body:SetJustifyH("LEFT")
-  body:SetJustifyV("TOP")
-  body:SetSpacing(2)
-
-  f:SetScript("OnUpdate", function(frame, elapsed)
-    frame.ttbElapsed = (frame.ttbElapsed or 0) + elapsed
-    if frame.ttbElapsed >= 1 then frame.ttbElapsed = 0; TTB:RefreshUI() end
-  end)
-
-  tinsert(UISpecialFrames, "TaliaaTradeBetaFrame")
-  self:CreateReportWindow()
-  self.currentView = self.db and self.db.settings and self.db.settings.defaultView or "opportunities"
-  self:RefreshUI()
-
-  if self.db and self.db.settings and self.db.settings.windowShown then f:Show() else f:Hide() end
-end
-
-function TTB:CreateReportWindow()
-  if self.reportFrame then return end
-  local f = CreateFrame("Frame", "TaliaaTradeBetaReportFrame", UIParent, "BackdropTemplate")
-  self.reportFrame = f
-  f:SetSize(860, 600)
-  f:SetPoint("CENTER")
-  f:SetFrameStrata("FULLSCREEN_DIALOG")
-  f:SetClampedToScreen(true)
-  f:SetMovable(true)
-  f:EnableMouse(true)
-  f:RegisterForDrag("LeftButton")
-  f:SetScript("OnDragStart", function(frame) frame:StartMoving() end)
-  f:SetScript("OnDragStop", function(frame) frame:StopMovingOrSizing() end)
-  f:SetBackdrop({
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
-    insets = { left = 11, right = 12, top = 12, bottom = 11 },
-  })
-
-  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  title:SetPoint("TOPLEFT", 22, -18)
-  title:SetText("COPY TALIAA TRADE TEST REPORT")
-  local hint = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -5)
-  hint:SetText("Ctrl+A, Ctrl+C. Includes market-model summary, API probe, and recent log.")
-  local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-  close:SetPoint("TOPRIGHT", -7, -7)
-
-  local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-  scroll:SetPoint("TOPLEFT", 22, -66)
-  scroll:SetPoint("BOTTOMRIGHT", -42, 22)
-  local edit = CreateFrame("EditBox", nil, scroll)
-  self.reportEditBox = edit
-  edit:SetMultiLine(true)
-  edit:SetAutoFocus(false)
-  edit:SetFontObject(ChatFontNormal)
-  edit:SetWidth(790)
-  edit:SetTextInsets(4, 4, 4, 4)
-  edit:SetScript("OnEscapePressed", function(box) box:ClearFocus() end)
-  edit:SetScript("OnTextChanged", function() scroll:UpdateScrollChildRect() end)
-  scroll:SetScrollChild(edit)
-  edit:SetHeight(500)
-  tinsert(UISpecialFrames, "TaliaaTradeBetaReportFrame")
-  f:Hide()
-end
-
-function TTB:ShowReport()
-  if not self.reportFrame then self:CreateReportWindow() end
-  local text = self:BuildTextReport()
-  self.reportEditBox:SetText(text)
-  self.reportEditBox:SetCursorPosition(0)
-  local lines = 1
-  for _ in string.gmatch(text, "\n") do lines = lines + 1 end
-  self.reportEditBox:SetHeight(math.max(500, lines * 15 + 30))
-  self.reportFrame:Show()
-  self.reportEditBox:SetFocus()
-  self.reportEditBox:HighlightText()
-end
-
-function TTB:RefreshUI()
-  if not self.frame or not self.frame:IsShown() then return end
-  if self.scanStatusText then
-    local remain = self:GetSecondsUntilFreshScanAllowed()
-    self.scanStatusText:SetText(string.format("Scan: %s  |  %d%%  |  next fresh full snapshot: %s  |  saved DB remains available between scans",
-      tostring(self.scanState.status), math.floor((self.scanState.progress or 0) * 100 + 0.5), self:FormatDuration(remain)))
-  end
-  if self.freshScanButton then
-    local remain = self:GetSecondsUntilFreshScanAllowed()
-    if remain > 0 then self.freshScanButton:SetText("FRESH SCAN " .. self:FormatDuration(remain)) else self.freshScanButton:SetText("REQUEST FRESH SCAN") end
-  end
-  if self.queryEditBox and self.queryEditBox:GetText() == "" and self.suggestedTestItemID then self.queryEditBox:SetText(tostring(self.suggestedTestItemID)) end
-  if self.bodyText then
-    local text = self:BuildCurrentViewText()
-    self.bodyText:SetText(text)
-    self.scrollChild:SetHeight(math.max(1600, self.bodyText:GetStringHeight() + 40))
-  end
-end
-
-function TTB:ToggleUI()
-  if not self.frame then self:InitializeUI() end
-  if self.frame:IsShown() then
-    self.frame:Hide()
-    if self.db and self.db.settings then self.db.settings.windowShown = false end
-  else
-    self.frame:Show()
-    if self.db and self.db.settings then self.db.settings.windowShown = true end
+function M:ToggleUI() if self.window:IsShown() then self.window:Hide() else self.window:Show(); self:RefreshUI() end end
+function M:InitializeUI()
+  if self.window then return end
+  local f=CreateFrame('Frame','VoidMarkMarketWindow',UIParent,'BackdropTemplate'); self.window=f
+  f:SetSize(1040,680); f:SetPoint('CENTER'); f:SetFrameStrata('HIGH'); f:SetMovable(true); f:EnableMouse(true)
+  f:SetClampedToScreen(true); f:RegisterForDrag('LeftButton')
+  f:SetScript('OnDragStart',function(w) w:StartMoving() end); f:SetScript('OnDragStop',function(w) w:StopMovingOrSizing() end)
+  f:SetBackdrop({bgFile='Interface\\Buttons\\WHITE8X8',edgeFile='Interface\\Tooltips\\UI-Tooltip-Border',edgeSize=16,insets={left=4,right=4,top=4,bottom=4}})
+  f:SetBackdropColor(0.025,0.022,0.04,0.97); f:SetBackdropBorderColor(0.45,0.3,0.7,1)
+  if UIParent.GetWidth then f:SetScale(math.min(1,(UIParent:GetWidth()-30)/1040,(UIParent:GetHeight()-30)/680)) end
+  label(f,'VOIDMARK MARKET',18,-16,300,'GameFontNormalLarge')
+  self.modeLabel=label(f,'SAFE MODE ON',365,-19,580)
+  button(f,'X',995,-12,26,function() f:Hide() end)
+  for i,v in ipairs(tabs) do local tab=v; button(f,v:upper(),18+(i-1)*126,-48,122,function() self:SetView(tab) end) end
+  self.status=label(f,'',18,-84,995)
+  self.toolbar=CreateFrame('Frame',nil,f); self.toolbar:SetPoint('TOPLEFT',18,-109); self.toolbar:SetSize(1000,34)
+  self.scanButton=button(self.toolbar,'FULL SCAN',0,0,125,function() self:RequestFreshScan() end)
+  self.cachedButton=button(self.toolbar,'CACHED',132,0,100,function() self:AnalyzeCachedSnapshot() end)
+  self.filter=edit(self.toolbar,305,-1,210,self.db.settings.filter); label(self.toolbar,'Filter:',245,-7,50)
+  self.filter:SetScript('OnTextChanged',function(e) self.db.settings.filter=e:GetText(); self.page=1; self:RefreshUI() end)
+  self.sortButton=button(self.toolbar,'SORT: SCORE',530,0,125,function()
+    local sorts={'score','profit','roi','name'}; local current=self.db.settings.sort
+    for i,v in ipairs(sorts) do if v==current then self.db.settings.sort=sorts[i%#sorts+1]; break end end
     self:RefreshUI()
+  end)
+  button(self.toolbar,'<',750,0,32,function() self.page=math.max(1,(self.page or 1)-1); self:RefreshUI() end)
+  button(self.toolbar,'>',788,0,32,function() self.page=(self.page or 1)+1; self:RefreshUI() end)
+  self.pageText=label(self.toolbar,'',830,-7,155)
+  self.tableFrame=CreateFrame('Frame',nil,f); self.tableFrame:SetPoint('TOPLEFT',18,-151); self.tableFrame:SetSize(1000,340)
+  self.headings={}; self.rows={}
+  local widths={270,105,105,110,75,55,110,120}; local x=0
+  for i,w in ipairs(widths) do self.headings[i]=label(self.tableFrame,'',x,-2,w); x=x+w end
+  for r=1,12 do
+    local b=CreateFrame('Button',nil,self.tableFrame); self.rows[r]=b; b:SetPoint('TOPLEFT',0,-25-(r-1)*25); b:SetSize(1000,25)
+    b:SetHighlightTexture('Interface\\QuestFrame\\UI-QuestTitleHighlight'); b.cols={}; local cx=0
+    for i,w in ipairs(widths) do b.cols[i]=label(b,'',cx,-6,w-5,'GameFontHighlightSmall'); cx=cx+w end
+    b:SetScript('OnClick',function(row)
+      if not row.data then return end
+      self.selectedRow=row.data
+      if self.view=='opportunities' then self:SelectOpportunity(row.data)
+      elseif self.view=='my auctions' then self:AnalyzeOwnedLive(row.data)
+      else self:RefreshUI() end
+    end)
   end
+  self.detail=label(f,'',18,-493,998,'GameFontHighlightSmall'); self.detail:SetHeight(125); self.detail:SetJustifyV('TOP')
+  self.contentScroll=CreateFrame('ScrollFrame',nil,f,'UIPanelScrollFrameTemplate')
+  self.contentScroll:SetPoint('TOPLEFT',18,-151); self.contentScroll:SetSize(976,465)
+  local child=CreateFrame('Frame',nil,self.contentScroll); child:SetSize(972,460); self.contentScroll:SetScrollChild(child)
+  self.content=label(child,'',0,0,960,'GameFontHighlightSmall'); self.content:SetJustifyV('TOP')
+  self.action=CreateFrame('Frame',nil,f); self.action:SetPoint('BOTTOMLEFT',18,18); self.action:SetSize(1000,28)
+  self.quantity=edit(self.action,83,-1,80,'1'); label(self.action,'Quantity:',0,-7,80)
+  self.revalidateButton=button(self.action,'REVALIDATE',180,0,130,function() self:RevalidateSelected(self.quantity:GetText()) end)
+  self.executeButton=button(self.action,'EXECUTE',318,0,130,function() self:ExecuteClicked() end)
+  self.confirmButton=button(self.action,'CONFIRM QUOTE',456,0,155,function() self:ConfirmClicked() end)
+  self.cancelQuoteButton=button(self.action,'DISCARD QUOTE',619,0,150,function()
+    if self.execution.state=='quoting' or self.execution.state=='quoted' then self:InvalidateQuote('Quote discarded') end
+  end)
+  self.ledgerAction=CreateFrame('Frame',nil,f); self.ledgerAction:SetPoint('BOTTOMLEFT',18,18); self.ledgerAction:SetSize(1000,28)
+  button(self.ledgerAction,'BOOK REVIEWED SALE',0,0,190,function()
+    if not self:BookSale(self.selectedRow) then self:Print('Select an unbooked verified invoice with one exact market match') end
+  end)
+  button(self.ledgerAction,'MARK BUY CONFIRMED',200,0,200,function() self:ReviewPending(self.selectedRow,true) end)
+  button(self.ledgerAction,'MARK BUY FAILED',410,0,170,function() self:ReviewPending(self.selectedRow,false) end)
+  self.ownedRefresh=button(f,'REFRESH MY AUCTIONS',18,-628,210,function() self:RequestOwnedAuctionsDiagnostic() end)
+  self.settingsFrame=CreateFrame('Frame',nil,f); self.settingsFrame:SetPoint('TOPLEFT',18,-151); self.settingsFrame:SetSize(998,460)
+  local settings={
+    {'maxTransaction','Maximum transaction (gold)',10000},{'maxItemSpend','Maximum per-item exposure (gold)',10000},
+    {'maxExposure','Maximum portfolio exposure (gold)',10000},{'maxQuantity','Maximum quantity',1},
+    {'minProfit','Minimum expected profit (silver)',100},{'minROI','Minimum ROI (%)',0.01},
+    {'minConfidence','Minimum confidence (0-100)',1},{'minLiquidity','Minimum inferred liquidity (0-100)',1},
+    {'riskTolerance','Maximum volatility (%)',0.01},{'depositReserve','Resale deposit allowance/unit (silver)',100},
+    {'ahCut','AH cut (%) - verify current AH',0.01},{'maxDataAge','Maximum model age (minutes)',60}}
+  self.settingFields={}
+  for i,s in ipairs(settings) do
+    local col=(i-1)%2; local row=math.floor((i-1)/2); local x=col*495
+    label(self.settingsFrame,s[2],x,-row*52,355)
+    local e=edit(self.settingsFrame,x+365,-row*52+3,100,tostring(self.db.settings[s[1]]/s[3]))
+    self.settingFields[#self.settingFields+1]={edit=e,key=s[1],factor=s[3]}
+  end
+  button(self.settingsFrame,'APPLY LIMITS',0,-335,155,function()
+    local values={}
+    for _,s in ipairs(self.settingFields) do
+      local n=tonumber(s.edit:GetText())
+      if not n or n<0 or n>1e9 then self:Print('Use nonnegative numeric limits'); return end
+      values[s.key]=n*s.factor
+    end
+    if values.ahCut>0.30 or values.minConfidence>100 or values.minLiquidity>100 or values.riskTolerance>2 or values.maxDataAge>86400*7 then self:Print('One or more limits exceed supported ranges'); return end
+    values.maxQuantity=math.floor(values.maxQuantity)
+    for k,v in pairs(values) do self.db.settings[k]=v end
+    if self.execution.state=='quoted' then self:InvalidateQuote('Limits changed; revalidate')
+    elseif self.execution.state=='ready' then self.execution.state='stale'; self.execution.message='Limits changed; revalidate' end
+    self:RebuildOpportunities(); self:RefreshUI()
+  end)
+  self.safe=CreateFrame('CheckButton',nil,self.settingsFrame,'UICheckButtonTemplate'); self.safe:SetPoint('TOPLEFT',190,-332); self.safe:SetSize(28,28)
+  label(self.settingsFrame,'SAFE MODE (starts ON every login)',223,-340,450)
+  self.safe:SetChecked(true); self.safe:SetScript('OnClick',function(c)
+    self.db.settings.safeMode=c:GetChecked() and true or false; self.safeMode=self.db.settings.safeMode
+    if self.safeMode and (self.execution.state=='quoted' or self.execution.state=='quoting') then self:InvalidateQuote('Safe Mode enabled') end
+    self:RefreshUI()
+  end)
+  label(self.settingsFrame,'Turning Safe Mode off enables purchase buttons. Each purchase still needs a real click.\nDeposit allowance is an estimate; set it conservatively. Pending orders remain reserved through reloads.\nLiquidity describes observed supply/depth, not proven sale speed. Cross-client sharing is deferred.',0,-387,970)
+  self.view='market'; self.page=1; self:RefreshUI(); f:Show()
+end
+function M:ShowReport()
+  if not self.reportWindow then
+    local f=CreateFrame('Frame',nil,UIParent,'BackdropTemplate'); self.reportWindow=f; f:SetSize(800,570); f:SetPoint('CENTER'); f:SetFrameStrata('DIALOG')
+    f:SetBackdrop({bgFile='Interface\\Buttons\\WHITE8X8'}); f:SetBackdropColor(0.02,0.02,0.02,1)
+    button(f,'CLOSE',665,-12,115,function() f:Hide() end)
+    label(f,'Diagnostics - Ctrl+A, Ctrl+C to copy',18,-18,600)
+    local scroll=CreateFrame('ScrollFrame',nil,f,'UIPanelScrollFrameTemplate'); scroll:SetPoint('TOPLEFT',18,-52); scroll:SetSize(745,490)
+    local e=CreateFrame('EditBox',nil,scroll); e:SetMultiLine(true); e:SetFontObject('ChatFontNormal'); e:SetWidth(735); e:SetAutoFocus(false); e:SetScript('OnEscapePressed',function() f:Hide() end); scroll:SetScrollChild(e); self.reportEdit=e
+  end
+  self.reportEdit:SetText(self:BuildTextReport()); self.reportWindow:Show(); self.reportEdit:SetFocus(); self.reportEdit:HighlightText()
+end
+function M:RenderUI()
+  self.uiDirty=false; if not self.window or not self.window:IsShown() then return end
+  local view=self.view or 'market'; local s=self.db.settings
+  self.modeLabel:SetText(s.safeMode and '|cff72e7aaSAFE MODE ON - no transactions|r' or '|cffffa250TRADING ENABLED - real clicks required|r')
+  self.status:SetText('AH '..(self.ahOpen and 'OPEN' or 'CLOSED')..' | '..self.scanState.status..' | full scan cooldown '..self:FormatDuration(self:GetSecondsUntilFreshScanAllowed()))
+  self.toolbar:Show(); self.tableFrame:Hide(); self.detail:Hide(); self.contentScroll:Hide(); self.settingsFrame:Hide(); self.action:Hide(); self.ledgerAction:Hide(); self.ownedRefresh:Hide()
+  self.filter:SetShown(view=='opportunities'); self.sortButton:SetShown(view=='opportunities'); self.sortButton:SetText('SORT: '..s.sort:upper())
+  self.scanButton:SetEnabled(self.ahOpen and not self.scanState.running); self.cachedButton:SetEnabled(self.ahOpen and not self.scanState.running)
+  if view=='settings' then self.settingsFrame:Show(); self.safe:SetChecked(s.safeMode); return end
+  local text
+  if view=='execution' then
+    self.action:Show(); local x=self.execution; local m=x.market
+    local lines={'|cffffffffEXECUTION / '..x.state:upper()..'|r',x.message,'',m and m.name or 'Select an opportunity first.'}
+    if m then
+      lines[#lines+1]='Historical ask '..self:Money(m.latest.floor)..' | fair '..self:Money(m.fairValue)..' | meaningful floor '..self:Money(m.latest.meaningfulFloor or m.latest.q10)
+      lines[#lines+1]='Confidence '..tostring(m.confidence)..' | inferred liquidity '..tostring(m.activity)..' | '..m.observations..' observations'
+      lines[#lines+1]=m.modelReason or ''
+      local p=x.opportunity.parts
+      if p then lines[#lines+1]=string.format('Rank %d: profit +%.1f, ROI +%.1f, confidence +%.1f, liquidity +%.1f, depth +%.1f, volatility -%.1f, capital -%.1f',x.opportunity.score,p.profit,p.roi,p.confidence,p.liquidity,p.depth,p.risk,p.exposure) end
+      lines[#lines+1]='Snapshot limits: '..(x.opportunity.pass and 'passed at analysis time' or table.concat(x.opportunity.blocks or {},'; '))
+      if x.live then
+        local e=x.live.economics
+        lines[#lines+1]='\nLIVE: '..x.live.quantity..' units | total '..self:Money(x.live.cost)..' | expected net '..self:Money(e.net)..' | ROI '..self:PercentText(e.roi)
+        lines[#lines+1]='Gross estimate '..self:Money(e.gross)..' | cut '..self:Money(e.fee)..' | deposit allowance '..self:Money(e.depositReserve)
+        lines[#lines+1]=x.commodity and 'Commodity: EXECUTE requests a quote; CONFIRM QUOTE purchases it.' or ('Regular item: one full auction #'..tostring(x.live.auctionID))
+        lines[#lines+1]='Model '..e.kind..(e.kind=='vendor' and ': vendor spread, no resale fees' or ': resale estimates do not guarantee a sale')
+      end
+      lines[#lines+1]='\nWhy: '..table.concat(m.reasons or {},'; ')
+      lines[#lines+1]='Risks: '..table.concat(m.risks or {},'; ')
+    end
+    self.revalidateButton:SetEnabled(not self.persistenceBlocked and self.ahOpen and m~=nil and not self:HasUnresolvedPurchase() and x.state~='quoting' and x.state~='quoted' and x.state~='validating')
+    self.executeButton:SetEnabled(not self.persistenceBlocked and not s.safeMode and self.ahOpen and x.state=='ready' and not self:HasUnresolvedPurchase())
+    self.confirmButton:SetEnabled(not s.safeMode and x.state=='quoted')
+    self.cancelQuoteButton:SetEnabled(x.state=='quoted' or x.state=='quoting')
+    text=table.concat(lines,'\n')
+  elseif view=='diagnostics' then text=self:BuildTextReport()
+  elseif view=='market' then
+    local scan=self.db.latestScan; local stats=self.db.marketStats or {}; local totals=self:LedgerTotals()
+    text='|cffffffffLOCAL MARKET TERMINAL|r\n\n'..#(self.marketIndex or {})..' markets | '..#self.db.opportunities..' ranked candidates\nEconomy: '..self.economyID..'\n\n'
+    if scan then text=text..string.format('Last scan %s\nRows %d | valid %d | invalid %d | incomplete %d\nMarkets %d | total supply %d | elapsed %s ms | generation #%s\n\n',date('%Y-%m-%d %H:%M',scan.completedAt or time()),scan.rawRows or 0,scan.auctionsProcessed or 0,scan.invalidRecords or 0,scan.incompleteRecords or 0,scan.uniqueItems or 0,scan.totalQuantity or 0,tostring(scan.processingMS),tostring(scan.marketScanID)) end
+    text=text..'Tracked inventory cost '..self:Money(totals.inventory)..' | reserved orders '..self:Money(totals.reserved)..'\nCost-matched realized result '..self:Money(totals.realized)..' | net sale revenue '..self:Money(totals.revenue)..'\n\nFull scans have a 15-minute safety cooldown. Cached analysis cannot increase history confidence.\nPricing blends lower-market depth and recent history. Missing markets retain their last observation.\nChoose OPPORTUNITIES, select a row, then REVALIDATE before considering EXECUTE.\nSelling and cancel/repost analysis are advisory; use the native AH for posting/cancelling.\n/vmm report opens copyable diagnostics.'
+  else
+    local source,headers={},{'Name','Ask','Fair','Net','ROI','Score','Confidence','Liquidity'}
+    if view=='opportunities' then
+      for _,o in ipairs(self.db.opportunities) do if tostring(o.name):lower():find(s.filter:lower(),1,true) then source[#source+1]=o end end
+      table.sort(source,function(a,b)
+        if s.sort=='name' then return tostring(a.name)<tostring(b.name) end
+        local av=s.sort=='profit' and a.economics.net or s.sort=='roi' and a.economics.roi or a.score
+        local bv=s.sort=='profit' and b.economics.net or s.sort=='roi' and b.economics.roi or b.score
+        return av>bv
+      end)
+    elseif view=='selling' then source=self.sellingRows; headers={'Inventory','Quantity','Suggest/unit','Fair','Floor','','Confidence','Status'}
+    elseif view=='my auctions' then source=self.ownedRows; self.ownedRefresh:Show(); headers={'My listing','Quantity','My unit','Competitor','Time left','','',''}
+    elseif view=='ledger' then
+      self.ledgerAction:Show(); headers={'Event / item','Quantity','Cost','Revenue','State','ID','Evidence',''}
+      for i=#self.db.ledger,1,-1 do source[#source+1]=self.db.ledger[i] end
+      -- Unresolved purchases remain selectable even after compact history pruning.
+      for _,p in pairs(self.db.pending) do
+        local found=false; for _,e in ipairs(source) do if e==p then found=true; break end end
+        if not found then table.insert(source,1,p) end
+      end
+    end
+    local pages=math.max(1,math.ceil(#source/12)); self.page=math.min(self.page or 1,pages)
+    self.pageText:SetText(self.page..' / '..pages..' ('..#source..')')
+    self.tableFrame:Show(); self.detail:Show()
+    for i,h in ipairs(headers) do self.headings[i]:SetText(h) end
+    for i,row in ipairs(self.rows) do
+      local o=source[(self.page-1)*12+i]; row.data=o; row:SetShown(o~=nil)
+      if o then
+        local cells
+        if view=='opportunities' then cells={(o.kind=='vendor' and '|cff72e7aa[VENDOR]|r ' or '')..o.name,self:Money(o.floor),self:Money(o.fairValue),self:Money(o.economics.net),self:PercentText(o.economics.roi),o.score,o.confidence,o.activity}
+        elseif view=='selling' then cells={o.name,o.quantity,self:Money(o.price),self:Money(o.fair),self:Money(o.floor),'',o.confidence,o.stale and 'STALE' or 'Estimate'}
+        elseif view=='my auctions' then cells={o.name,o.quantity,self:Money(o.unit),o.competition and self:Money(o.competition) or '?',tostring(o.timeLeft or '?'),'','',''}
+        else cells={(o.kind or '')..': '..tostring(o.name or o.auctionID or ''),o.quantity or '',o.cost and self:Money(o.cost) or '',o.gross and self:Money(o.gross) or '',o.booked and 'booked' or o.status,o.id,o.evidence or '',''} end
+        for j,c in ipairs(cells) do row.cols[j]:SetText(tostring(c)) end
+      end
+    end
+    local o=self.selectedRow
+    if view=='opportunities' then self.detail:SetText('Select a row to inspect economics and revalidate live prices. Vendor opportunities have a separate model.\nResale rankings weigh absolute profit, ROI, confidence, inferred liquidity, depth, volatility and capital exposure.\nA snapshot opportunity may fail current limits or disappear before you buy. Live prices expire after 10 seconds.')
+    elseif view=='ledger' then
+      local t=self:LedgerTotals()
+      self.detail:SetText('Cost-matched realized '..self:Money(t.realized)..' | ROI '..self:PercentText(t.roi)..' | fees '..self:Money(t.fees)..' | uncosted revenue '..self:Money(t.uncostedRevenue)..'\n'..(o and (tostring(o.evidence)..'\n'..tostring(o.name or '')..' | market '..tostring(o.marketKey)..' | deposit refund '..self:Money(o.depositRefund)) or 'Select an invoice or unresolved order.')..'\nMailbox invoices are observed facts, but have no unique ID. Review identity before BOOK REVIEWED SALE.\nPurchase cost uses moving average. Unknown cost is excluded from realized profit; manually reported outcomes are labeled.')
+    else self.detail:SetText(o and (tostring(o.name)..'\n'..tostring(o.reason or '')..'\nAdvisory only. Verify live price and deposit in the native auction window.') or 'Select a row for details. Posting and cancellation use the native auction window.') end
+    return
+  end
+  self.contentScroll:Show(); self.content:SetText(text or ''); self.content:SetHeight(math.max(450,self.content:GetStringHeight()+20))
 end

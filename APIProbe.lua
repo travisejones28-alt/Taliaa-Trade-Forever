@@ -7,6 +7,11 @@ local API_SPECS = {
   { "C_AuctionHouse.GetReplicateItemLink", "READ - cached snapshot item link" },
   { "C_AuctionHouse.GetReplicateItemTimeLeft", "READ - cached snapshot time left" },
   { "C_AuctionHouse.IsThrottledMessageSystemReady", "READ - AH throttle state" },
+  { "C_AuctionHouse.RefreshItemSearchResults", "QUERY - refresh cached regular-item results" },
+  { "C_AuctionHouse.RefreshCommoditySearchResults", "QUERY - refresh cached commodity results" },
+  { "C_AuctionHouse.GetItemKeyInfo", "READ - key metadata and classification" },
+  { "C_AuctionHouse.HasSearchResults", "READ - cached search presence" },
+  { "C_AuctionHouse.CancelCommoditiesPurchase", "QUOTE - cancel unconfirmed quote" },
   { "C_AuctionHouse.MakeItemKey", "READ - construct item key" },
   { "C_AuctionHouse.SendSearchQuery", "QUERY - item/commodity search" },
   { "C_AuctionHouse.SendSellSearchQuery", "QUERY - sell-side search" },
@@ -26,11 +31,11 @@ local API_SPECS = {
   { "C_AuctionHouse.CalculateCommodityDeposit", "READ/CALC - deposit quote" },
   { "C_AuctionHouse.CalculateItemDeposit", "READ/CALC - deposit quote" },
   { "C_AuctionHouse.StartCommoditiesPurchase", "PROTECTED - hardware event required on modern AH" },
-  { "C_AuctionHouse.ConfirmCommoditiesPurchase", "PURCHASE - not called by this beta tester" },
-  { "C_AuctionHouse.PlaceBid", "PROTECTED/PURCHASE - not called by this beta tester" },
-  { "C_AuctionHouse.PostCommodity", "PROTECTED/POST - not called by this beta tester" },
-  { "C_AuctionHouse.PostItem", "PROTECTED/POST - not called by this beta tester" },
-  { "C_AuctionHouse.CancelAuction", "PROTECTED/CANCEL - not called by this beta tester" },
+  { "C_AuctionHouse.ConfirmCommoditiesPurchase", "PURCHASE - hardware input required" },
+  { "C_AuctionHouse.PlaceBid", "PROTECTED/PURCHASE - hardware input required" },
+  { "C_AuctionHouse.PostCommodity", "PROTECTED/POST - hardware input required" },
+  { "C_AuctionHouse.PostItem", "PROTECTED/POST - hardware input required" },
+  { "C_AuctionHouse.CancelAuction", "PROTECTED/CANCEL - hardware input required" },
   { "C_AuctionHouse.CanCancelAuction", "READ - cancel eligibility" },
   { "C_AuctionHouse.GetCancelCost", "READ - cancel cost" },
   { "C_AuctionHouse.SupportsCopperValues", "READ - currency behavior" },
@@ -43,6 +48,7 @@ local EVENT_SPECS = {
   "AUCTION_HOUSE_SHOW_ERROR",
   "AUCTION_HOUSE_AUCTION_CREATED",
   "AUCTION_CANCELED",
+  "AUCTION_HOUSE_PURCHASE_COMPLETED",
   "ITEM_PURCHASED",
   "COMMODITY_PURCHASED",
   "COMMODITY_PURCHASE_SUCCEEDED",
@@ -158,26 +164,3 @@ TTB:RegisterHandler("AUCTION_HOUSE_CLOSED", function(self)
   end
 end)
 
-TTB:RegisterHandler("AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED", function(self)
-  self:Log("THROTTLE", "Message queued")
-end)
-
-TTB:RegisterHandler("AUCTION_HOUSE_THROTTLED_MESSAGE_SENT", function(self)
-  self:Log("THROTTLE", "Message sent")
-end)
-
-TTB:RegisterHandler("AUCTION_HOUSE_THROTTLED_MESSAGE_RESPONSE_RECEIVED", function(self)
-  self:Log("THROTTLE", "Response received")
-end)
-
-TTB:RegisterHandler("AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED", function(self)
-  self:Log("THROTTLE", "Message DROPPED by Blizzard throttle")
-end)
-
-TTB:RegisterHandler("AUCTION_HOUSE_THROTTLED_SYSTEM_READY", function(self)
-  self:Log("THROTTLE", "Throttle system ready")
-end)
-
-TTB:RegisterHandler("AUCTION_HOUSE_SHOW_ERROR", function(self, _, errorCode)
-  self:Log("AH ERROR", "Blizzard AH error: " .. tostring(errorCode))
-end)

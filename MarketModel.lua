@@ -2,7 +2,7 @@ local addonName, TTB = ...
 
 local MAX_HISTORY_PER_ITEM = 30
 local MAX_OPPORTUNITIES = 60
-local AH_CUT = 0.05
+local AH_CUT = 0.05 -- default; configured cut used below
 local MIN_BUY_OBSERVATIONS = 3
 local BUY_MIN_UNIT_PROFIT = 100      -- 1 silver per unit
 local BUY_MIN_DEPTH_PROFIT = 10000   -- or 1 gold across the currently cheap depth
@@ -114,16 +114,17 @@ end
 
 local function getVendorValue(itemID)
   if type(GetItemInfo) ~= "function" then return 0 end
-  local ok, _, _, _, _, _, _, _, _, _, sellPrice = pcall(GetItemInfo, itemID)
+  local ok, _, _, _, _, _, _, _, _, _, _, sellPrice = pcall(GetItemInfo, itemID)
   if ok then return tonumber(sellPrice) or 0 end
   return 0
 end
 
 local function confidenceLabel(score)
-  if score >= 78 then return "High" end
+  if score >= 85 then return "High Confidence" end
+  if score >= 70 then return "Established" end
   if score >= 55 then return "Moderate" end
   if score >= 32 then return "Developing" end
-  return "Low"
+  return "New"
 end
 
 local function liquidityLabel(score)
@@ -215,7 +216,7 @@ end
 function TTB:BuildMarketObservation(group, scanID, completedAt)
   local prices = sortedPrices(group.priceLevels)
   local qty = tonumber(group.quantity) or 0
-  local floor = round(group.floorUnitPrice)
+  local floor = math.ceil(group.floorUnitPrice)
   local floorQty = round(group.priceLevels[group.floorUnitPrice] or group.priceLevels[floor] or 0)
 
   local q10 = round(weightedQuantile(group.priceLevels, qty, 0.10, prices))
@@ -251,6 +252,8 @@ function TTB:BuildMarketObservation(group, scanID, completedAt)
     quantity = qty,
     floor = floor,
     floorQuantity = floorQty,
+    meaningfulFloor = q10,
+    tiers = #prices,
     ceiling = round(group.ceilingUnitPrice),
     q10 = q10,
     q25 = q25,
@@ -281,6 +284,7 @@ function TTB:UpdateMarketFromGroup(group, scanID, completedAt)
   market.history = market.history or {}
 
   local previous = market.history[#market.history]
+  if previous and completedAt-(tonumber(previous.at) or 0)<900 then return market end
   local obs = self:BuildMarketObservation(group, scanID, completedAt)
 
   market.itemID = itemID
@@ -290,11 +294,18 @@ function TTB:UpdateMarketFromGroup(group, scanID, completedAt)
   market.quality = group.quality or market.quality
   market.level = group.level or market.level
   market.texture = group.texture or market.texture
-  market.vendorPrice = getVendorValue(itemID)
+  market.vendorPrice = getVendorValue(group.itemLink or itemID)
+  market.itemLink = group.itemLink or market.itemLink
+  market.archived = nil
+  market.analysisIncomplete = nil
   market.firstSeen = market.firstSeen or completedAt
   market.lastSeen = completedAt
 
-  local histFair, histCount = historicalFair(market.history)
+  local recentHistory = {}
+  for _, h in ipairs(market.history) do
+    if type(h)=="table" and (tonumber(h.at) or 0)>=completedAt-30*86400 then recentHistory[#recentHistory+1]=h end
+  end
+  local histFair, histCount = historicalFair(recentHistory)
   local current = obs.depthValue
   local historyWeight
   if histCount <= 0 then historyWeight = 0
@@ -306,11 +317,21 @@ function TTB:UpdateMarketFromGroup(group, scanID, completedAt)
 
   local fairValue = current
   if histFair > 0 then fairValue = current * (1 - historyWeight) + histFair * historyWeight end
+  -- Reviewed seller invoices can inform the model, but cannot dominate depth.
+  local saleSum,saleWeight,saleCount=0,0,0
+  for _,sale in ipairs(market.bookedSales or {}) do
+    if (sale.at or 0)>=completedAt-30*86400 and (sale.quantity or 0)>0 then
+      local w=math.min(10,sale.quantity)
+      saleSum=saleSum+clamp(sale.price,current*0.6,current*1.5)*w; saleWeight=saleWeight+w; saleCount=saleCount+1
+    end
+  end
+  if saleCount>=3 and saleWeight>0 then fairValue=fairValue*0.85+(saleSum/saleWeight)*0.15 end
+  market.recordedSaleSamples=saleCount
   fairValue = round(fairValue)
 
   local volatility = volatilityFromHistory(market.history, obs.median)
   market.totalObservations = (tonumber(market.totalObservations) or #market.history) + 1
-  local observations = market.totalObservations
+  local observations = #recentHistory + 1
   local sampleScore = math.min(46, observations * 7.5)
   local listingScore = math.min(24, math.log(math.max(1, obs.listings) + 1) * 6)
   local quantityScore = math.min(18, math.log(math.max(1, obs.quantity) + 1) * 2.9)
@@ -321,6 +342,9 @@ function TTB:UpdateMarketFromGroup(group, scanID, completedAt)
   if observations <= 1 then confidenceScore = math.min(confidenceScore, 30)
   elseif observations == 2 then confidenceScore = math.min(confidenceScore, 48)
   elseif observations == 3 then confidenceScore = math.min(confidenceScore, 62) end
+  local span = #recentHistory>0 and completedAt-(tonumber(recentHistory[1].at) or completedAt) or 0
+  if span<86400 then confidenceScore=math.min(confidenceScore,62)
+  elseif span<7*86400 then confidenceScore=math.min(confidenceScore,80) end
 
   local supplyChange, supplyChangePct, medianMovePct, floorMovePct = 0, 0, 0, 0
   if previous then
@@ -338,12 +362,13 @@ function TTB:UpdateMarketFromGroup(group, scanID, completedAt)
   elseif #market.history < 3 then activityScore = math.min(activityScore, 50) end
 
   local priceAdvantage = fairValue > 0 and (fairValue - obs.floor) / fairValue or 0
-  local estimatedNetUnit = round(fairValue * (1 - AH_CUT) - obs.floor)
+  local estimatedNetUnit = round(fairValue * (1 - (self.db.settings.ahCut or AH_CUT)) - obs.floor)
   local estimatedNetPct = obs.floor > 0 and estimatedNetUnit / obs.floor or 0
-  local estimatedCheapNet = round(math.max(0, (fairValue * (1 - AH_CUT) * obs.cheapQuantity) - obs.cheapCost))
+  local estimatedCheapNet = round(math.max(0, (fairValue * (1 - (self.db.settings.ahCut or AH_CUT)) * obs.cheapQuantity) - obs.cheapCost))
   local estimatedCheapROI = obs.cheapCost > 0 and estimatedCheapNet / obs.cheapCost or 0
 
   market.latest = obs
+  market.modelReason=string.format("Current depth = 45%% lower quartile + 55%% median; historical weight %.0f%% (%d recent samples)",historyWeight*100,histCount)
   market.observations = observations
   market.fairValue = fairValue
   market.historicalFair = round(histFair)
@@ -421,123 +446,3 @@ function TTB:UpdateMarketFromGroup(group, scanID, completedAt)
   return market
 end
 
-function TTB:FinalizeMarketScan(grouped, scanSummary)
-  if not self.db then return nil end
-  self.db.scanSequence = (tonumber(self.db.scanSequence) or 0) + 1
-  local scanID = self.db.scanSequence
-  local completedAt = tonumber(scanSummary.completedAt) or time()
-  local all = {}
-  local itemCount = 0
-
-  for _, group in pairs(grouped or {}) do
-    local market = self:UpdateMarketFromGroup(group, scanID, completedAt)
-    if market then
-      all[#all + 1] = market
-      itemCount = itemCount + 1
-    end
-  end
-
-  table.sort(all, function(a, b)
-    if (a.opportunityScore or 0) == (b.opportunityScore or 0) then
-      if (a.estimatedCheapNet or 0) == (b.estimatedCheapNet or 0) then
-        local aa = a.latest and a.latest.quantity or 0
-        local bb = b.latest and b.latest.quantity or 0
-        return aa > bb
-      end
-      return (a.estimatedCheapNet or 0) > (b.estimatedCheapNet or 0)
-    end
-    return (a.opportunityScore or 0) > (b.opportunityScore or 0)
-  end)
-
-  local opportunities = {}
-  for _, market in ipairs(all) do
-    if #opportunities >= MAX_OPPORTUNITIES then break end
-    if market.signal ~= "PASS" and market.latest and market.latest.floor > 0 and market.fairValue > 0 then
-      opportunities[#opportunities + 1] = {
-        itemID = market.itemID,
-        itemSuffix = market.itemSuffix or 0,
-        marketKey = market.marketKey,
-        name = market.name,
-        score = market.opportunityScore,
-        signal = market.signal,
-        floor = market.latest.floor,
-        fairValue = market.fairValue,
-        median = market.latest.median,
-        quantity = market.latest.quantity,
-        listings = market.latest.listings,
-        cheapQuantity = market.latest.cheapQuantity,
-        cheapCost = market.latest.cheapCost,
-        priceAdvantage = market.priceAdvantage,
-        estimatedNetUnit = market.estimatedNetUnit,
-        estimatedCheapNet = market.estimatedCheapNet,
-        estimatedCheapROI = market.estimatedCheapROI,
-        confidence = market.confidence,
-        confidenceScore = market.confidenceScore,
-        activity = market.activity,
-        activityScore = market.activityScore,
-        volatility = market.volatility,
-        vendorPrice = market.vendorPrice,
-        vendorArbitrage = market.vendorArbitrage,
-        thinFloor = market.thinFloor,
-        observations = market.observations,
-        reasons = market.reasons,
-        risks = market.risks,
-      }
-    end
-  end
-
-  self.db.opportunities = opportunities
-  self.db.opportunitiesGeneratedAt = completedAt
-  self.db.latestMarketScanID = scanID
-  self.db.marketStats = {
-    scanID = scanID,
-    generatedAt = completedAt,
-    marketsUpdated = itemCount,
-    storedMarkets = 0,
-    opportunities = #opportunities,
-    modelVersion = "0.2.1",
-    minBuyObservations = MIN_BUY_OBSERVATIONS,
-  }
-  for _ in pairs(self.db.market) do self.db.marketStats.storedMarkets = self.db.marketStats.storedMarkets + 1 end
-
-  return {
-    scanID = scanID,
-    opportunities = opportunities,
-    marketsUpdated = itemCount,
-    storedMarkets = self.db.marketStats.storedMarkets,
-  }
-end
-
-function TTB:GetMarketVariants(itemID)
-  itemID = tonumber(itemID)
-  local out = {}
-  if not itemID or not self.db or not self.db.market then return out end
-  for _, market in pairs(self.db.market) do
-    if type(market) == "table" and tonumber(market.itemID) == itemID and market.latest then out[#out + 1] = market end
-  end
-  table.sort(out, function(a, b)
-    if (a.lastSeen or 0) == (b.lastSeen or 0) then return (a.opportunityScore or 0) > (b.opportunityScore or 0) end
-    return (a.lastSeen or 0) > (b.lastSeen or 0)
-  end)
-  return out
-end
-
-function TTB:GetMarket(itemID)
-  local variants = self:GetMarketVariants(itemID)
-  return variants[1]
-end
-
-function TTB:GetTopOpportunities(limit)
-  local source = self.db and self.db.opportunities or {}
-  local out = {}
-  limit = math.max(1, math.min(60, tonumber(limit) or 20))
-  for i = 1, math.min(limit, #source) do out[i] = source[i] end
-  return out
-end
-
-function TTB:PercentText(v, decimals)
-  v = (tonumber(v) or 0) * 100
-  decimals = tonumber(decimals) or 0
-  if decimals <= 0 then return string.format("%.0f%%", v) end
-  return string.format("%.1f%%", v)
-end

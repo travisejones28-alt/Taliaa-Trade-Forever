@@ -1,0 +1,39 @@
+PASS All TOC modules load
+PASS Idempotent legacy migration and startup safety
+PASS Bait-resistant model, bounded history, vendor return index
+PASS Cached/repeated observations do not inflate confidence
+PASS Random suffix identity is isolated
+PASS Money formatting handles negative profit
+PASS Risk caps and reserved money
+PASS Request dedupe, throttle, priorities
+PASS Timeouts retry once then stop
+PASS Existing searches use refresh; cached rows never unlock EXECUTE
+PASS Search pagination waits for complete results
+PASS Mismatched suffix results ignored
+PASS Live regular auction revalidation, safe mode and click-only buy
+PASS Stale live results block purchase
+PASS Commodity quote needs second click; event never purchases
+PASS Commodity price increase invalidates quote
+PASS Late/duplicate quote cannot silently confirm
+PASS Unknown purchase reserves funds; late success resolves exactly once
+PASS Owned listings excluded from execution
+PASS Commodity ownership reduces available quantity
+PASS Moving-average accounting excludes unknown basis
+PASS Invoices are observed, deduped and not auto-booked
+50k scan job ticks: 598; synthetic-budget elapsed ms: 1113
+PASS 50,000 rows process across frames; malformed row isolated
+PASS Oversized price distribution retains history and blocks trading
+PASS UI builds and every terminal tab renders
+PASS Protocol boundary rejects malformed or stale summaries
+PASS Cached snapshot after cooldown cannot refresh model history
+PASS Bogus regular-auction quantities are capped to item stack size
+PASS Newer schemas remain untouched and cannot trade
+PASS Unresolved orders survive reload and share ledger identity
+PASS AH close during processing cancels scan publication
+PASS Changed live prices must still pass economics
+PASS Fresh-result completeness is mandatory
+PASS Aborted commodity quote enforces a stale-event guard
+PASS Expired/cancelled mailbox subjects are observations, not sales
+PASS Reviewed actual sales feed future fair value conservatively
+PASS Winning bid is used instead of advertised buyout; payout checked
+ALL 37 TESTS PASSED
