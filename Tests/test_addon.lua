@@ -71,8 +71,8 @@ local function check(name,fn)
   total=total+1; print('PASS '..name)
 end
 local function emit(e,...) M.eventFrame.scripts.OnEvent(M.eventFrame,e,...) end
-local function jobs()
-  local count=0; while next(M.jobs) do M:RunJobs(); count=count+1; assert(count<10000,'jobs stuck') end; return count
+local function jobs(clockStep)
+  local count=0; while next(M.jobs) do if clockStep then clock=clock+clockStep end; M:RunJobs(); count=count+1; assert(count<10000,'jobs stuck') end; return count
 end
 local function advance(s) clock=clock+s end
 local function resetQueue()
@@ -366,7 +366,7 @@ check('Full-scan send failure is visible without retry',function()
 end)
 check('Full-scan event history is bounded, reports are persisted, unsolicited cache not consumed',function()
  local d=freshScan();for i=1,30 do emit('AUCTION_ITEM_LIST_UPDATE') end
- assert(#d.events==24 and d.eventCount==30);M:CancelRequests('end')
+ assert(#d.events==1 and d.events[1].repeats==30 and d.eventCount==30);M:CancelRequests('end')
  M.scanState.fullScanDiagnostic=nil;replicateRows=100;emit('REPLICATE_ITEM_LIST_UPDATE');assert(not M.jobs.scan)
  M:InitializeDatabase();jobs();assert(M.db.fullScanDiagnostic==d)
  local report=M:BuildTextReport();assert(report:find('FULL SCAN DIAGNOSTICS',1,true) and report:find('legacy list',1,true))
@@ -383,5 +383,78 @@ check('New queued full scan invalidates earlier late-response correlation',funct
  ready=false;M:RequestFreshScan();local new=M.db.fullScanDiagnostic
  assert(not M.queue.lateReplicate and new~=d);emit('REPLICATE_ITEM_LIST_UPDATE');assert(not M.jobs.scan and new.eventCount==0)
  ready=true;advance(0.4);M:PumpQueue();emit('REPLICATE_ITEM_LIST_UPDATE');jobs();assert(new.phase=='done' and not d.recoveredLate)
+end)
+check('Delayed links recover once, preserve suffix identity and count incomplete rows once',function()
+ local info=C_AuctionHouse.GetReplicateItemInfo;local link=C_AuctionHouse.GetReplicateItemLink
+ local readyAt=GetTime()+2
+ C_AuctionHouse.GetReplicateItemInfo=function(i)
+   local v=table.pack(info(i));v[17]=90001+i;v[18]=false;return unpack(v,1,v.n)
+ end
+ C_AuctionHouse.GetReplicateItemLink=function(i)
+   if i==0 and GetTime()>=readyAt then return '|Hitem:90001:0:0:0:0:0:-18:0|h[Gear]|h' end
+ end
+ local d=freshScan(2);emit('REPLICATE_ITEM_LIST_UPDATE');jobs(0.25)
+ local scan=M.db.latestScan;assert(scan.deferredRows==2 and scan.recoveredRows==1 and scan.unresolvedRows==1)
+ assert(scan.auctionsProcessed==1 and scan.invalidRecords==1 and scan.incompleteRecords==2 and scan.totalQuantity==1)
+ assert(scan.variantRows==1 and M.db.market[M:Key(90001,-18)].latest.quantity==1)
+ assert(scan.rejectedReasons.missingLink==1 and d.recoveredRows==1 and scan.retryPasses>1)
+ C_AuctionHouse.GetReplicateItemInfo=info;C_AuctionHouse.GetReplicateItemLink=link
+end)
+check('Unresolved data retries are bounded; bid-only and unavailable rows have separate reasons',function()
+ local info=C_AuctionHouse.GetReplicateItemInfo;local link=C_AuctionHouse.GetReplicateItemLink
+ C_AuctionHouse.GetReplicateItemInfo=function(i)
+   local v=table.pack(info(i))
+   if i==1 then v[10]=0 elseif i==2 then v[16]=1 elseif i==3 then v[3]=nil end
+   return unpack(v,1,v.n)
+ end
+ C_AuctionHouse.GetReplicateItemLink=function(i) if i~=0 then return link(i) end end
+ local d=freshScan(4);emit('REPLICATE_ITEM_LIST_UPDATE');jobs(0.25)
+ local scan=M.db.latestScan;assert(scan.auctionsProcessed==0 and scan.invalidRecords==4 and scan.incompleteRecords==2)
+ assert(scan.deferredRows==2 and scan.unresolvedRows==2 and scan.retryPasses<=20 and scan.hydrationSeconds<=11)
+ local reasons=scan.rejectedReasons
+ assert(reasons.noBuyout==1 and reasons.unavailableSale==1 and reasons.missingLink==1 and reasons.missingFields==1)
+ assert(M:BuildFullScanReport():find('Rejected noBuyout: 1',1,true) and d.phase=='done')
+ C_AuctionHouse.GetReplicateItemInfo=info;C_AuctionHouse.GetReplicateItemLink=link
+end)
+check('3,500 update events are coalesced without log spam or parse restart',function()
+ local d=freshScan(100);emit('REPLICATE_ITEM_LIST_UPDATE');local token=M.scanToken;local logCount=#M.runtimeLog
+ for i=1,3500 do emit('REPLICATE_ITEM_LIST_UPDATE') end
+ assert(d.eventCount==3501 and #d.events==2 and d.events[2].repeats==3500)
+ assert(d.suppressedEventLogs==3500 and d.events[2].elapsed~=nil and M.scanToken==token and #M.runtimeLog==logCount)
+ jobs();assert(d.phase=='done' and M.db.latestScan.auctionsProcessed==99)
+ assert(not M:BuildFullScanReport():find('+nils',1,true))
+end)
+check('AH close during deferred-row retry cancels work and preserves last published scan',function()
+ local link=C_AuctionHouse.GetReplicateItemLink;C_AuctionHouse.GetReplicateItemLink=function() end
+ local old=M.db.latestScan;local d=freshScan(1);emit('REPLICATE_ITEM_LIST_UPDATE')
+ for i=1,5 do if M.scanState.phase=='hydrating' then break end;M:RunJobs() end
+ assert(M.scanState.phase=='hydrating');emit('AUCTION_HOUSE_CLOSED');jobs()
+ assert(d.phase=='aborted' and not M.jobs.scan and M.db.latestScan==old and not d.completedAt)
+ C_AuctionHouse.GetReplicateItemLink=link;emit('AUCTION_HOUSE_SHOW')
+end)
+check('Cached deferred-row recovery does not create fresh history or resend full scan',function()
+ local info=C_AuctionHouse.GetReplicateItemInfo;local link=C_AuctionHouse.GetReplicateItemLink
+ resetQueue();M.scanState.running=false;mk();local observed=market.totalObservations;local seen=market.lastSeen
+ local readyAt=GetTime()+1;replicateRows=1
+ C_AuctionHouse.GetReplicateItemInfo=function(i) local v=table.pack(info(i));v[17]=5001;return unpack(v,1,v.n) end
+ C_AuctionHouse.GetReplicateItemLink=function(i) if GetTime()>=readyAt then return '|Hitem:5001:0:0:0:0:0:0:0|h[Gear]|h' end end
+ local requestAt=M.db.lastFreshScanRequestAt;M:AnalyzeCachedSnapshot();jobs(0.25)
+ assert(M.db.latestScan.source=='cached snapshot' and M.db.latestScan.recoveredRows==1)
+ assert(market.totalObservations==observed and market.lastSeen==seen and #calls==0 and M.db.lastFreshScanRequestAt==requestAt)
+ C_AuctionHouse.GetReplicateItemInfo=info;C_AuctionHouse.GetReplicateItemLink=link
+end)
+check('Changing row count aborts parsing; varying event bursts retain bounded diagnostics',function()
+ local d=freshScan(1);emit('REPLICATE_ITEM_LIST_UPDATE')
+ for i=1,60 do replicateRows=i;emit('REPLICATE_ITEM_LIST_UPDATE') end
+ assert(#d.events==24 and d.eventCount==61 and d.lastReplicateRows==60 and d.responseRows==1)
+ assert(d.suppressedEventLogs==60 and not M.jobs.scan and M.scanState.phase=='error' and d.error:find('row count changed',1,true))
+end)
+check('Synchronous row-count change stops parsing without overwriting failure or publishing',function()
+ local info=C_AuctionHouse.GetReplicateItemInfo;local old=M.db.latestScan
+ C_AuctionHouse.GetReplicateItemInfo=function(i) replicateRows=2;emit('REPLICATE_ITEM_LIST_UPDATE');return info(i) end
+ local d=freshScan(1);emit('REPLICATE_ITEM_LIST_UPDATE');jobs()
+ assert(M.scanState.phase=='error' and M.scanState.status:find('row count changed',1,true))
+ assert(d.phase=='error' and not M.jobs.scan and M.db.latestScan==old)
+ C_AuctionHouse.GetReplicateItemInfo=info
 end)
 print('ALL '..total..' TESTS PASSED')

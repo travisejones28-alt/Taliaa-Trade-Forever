@@ -1,4 +1,4 @@
-# VoidMark Market 1.0.1-beta
+# VoidMark Market 1.0.2-beta
 
 A testable Forever auction terminal built from the supplied working prototype.
 **This build has automated mock validation, but has not run inside the Forever client.**
@@ -201,3 +201,34 @@ scan fails. The report distinguishes no replicate event, legacy events only,
 empty results, invalid counts, successful parsing and recovered late responses.
 This is a diagnostic fix validated with mocks; live beta response behavior still
 needs this test.
+
+## 1.0.2-beta item-data recovery
+
+The supplied live 1.0.1 report completed with 89,929 returned rows, 85,905 accepted
+rows, 2,603 markets and 200 listed candidates. Response time was 5.875 seconds;
+processing took 33.389 seconds. There were 3,476 replicate update events, 4,024
+rejected rows and 8,040 incomplete counts. The old counter could count one row
+with both missing metadata and a missing link twice; that is corrected here.
+
+- Rows missing required pricing fields or a usable item link are deferred and
+  reread across frames for up to 10 seconds after the initial pass (maximum
+  20 retry passes, then a final bounded pass). A recovered row is added once.
+- Known prices and links remain usable even if the optional hasAllInfo flag is
+  false/nil; owner/display metadata is not required to value a known variant.
+  Missing links are never guessed as suffix zero. Random-stat variants stay separate.
+- Reports separate recovered and unresolved rows from no-buyout listings,
+  unavailable sales, missing fields/links, and row API/parser errors. The
+  incomplete count now counts distinct source rows once.
+- Identical adjacent events are coalesced; total event counters remain exact.
+  Repeated event log lines are limited to one per five seconds. Request and parse
+  milestones remain visible, and elapsed times continue through parsing.
+- A changed replicate row count while parsing aborts that snapshot before model
+  publication; let the cache settle and choose CACHED to analyze it separately.
+  No new replicate request is automatically sent.
+
+Pull the update, `/reload`, keep Safe Mode on, and run FULL SCAN once when the
+cooldown expires. Then copy `/vmm report`. CACHED can test the new row handling
+without another server request, but it still does not refresh existing history or
+increase confidence. We do not yet know how many of the live rejected rows were
+loading late versus legitimate bid-only/otherwise unusable listings; the next
+report now distinguishes those cases.

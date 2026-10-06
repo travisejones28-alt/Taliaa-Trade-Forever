@@ -50,4 +50,11 @@ PASS Full-scan send failure is visible without retry
 PASS Full-scan event history is bounded, reports are persisted, unsolicited cache not consumed
 PASS Full scan response deadline starts at send, not queue entry
 PASS New queued full scan invalidates earlier late-response correlation
-ALL 51 TESTS PASSED
+PASS Delayed links recover once, preserve suffix identity and count incomplete rows once
+PASS Unresolved data retries are bounded; bid-only and unavailable rows have separate reasons
+PASS 3,500 update events are coalesced without log spam or parse restart
+PASS AH close during deferred-row retry cancels work and preserves last published scan
+PASS Cached deferred-row recovery does not create fresh history or resend full scan
+PASS Changing row count aborts parsing; varying event bursts retain bounded diagnostics
+PASS Synchronous row-count change stops parsing without overwriting failure or publishing
+ALL 58 TESTS PASSED

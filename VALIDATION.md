@@ -1,4 +1,20 @@
-# Full-scan audit — 1.0.1-beta
+# Item-data recovery audit — 1.0.2-beta
+
+**58 automated checks passed**, including the 51 checks from 1.0.1.
+New coverage includes delayed links recovered once with suffix identity intact;
+unique incomplete-row counting; bounded missing-data retry with rejection reasons;
+3,500-event coalescing without parse restart or log flood; AH closure while loading
+item data; cached recovery without new historical evidence or server requests;
+bounded varying-event history; and row-count change aborts, including synchronous
+callbacks inside the row reader. The baseline 50,000-row fixture still runs across
+roughly 600 job ticks. Full output is in `Tests/test-results.txt`.
+
+The supplied live 1.0.1 report confirms successful response/processing on beta
+build 70235. Item-data recovery and log coalescing in 1.0.2 are mock-validated;
+a live test is still required. Rejection reasons in the old report were not
+recorded, so the actual recoverable row count is unknown.
+
+## Full-scan audit — 1.0.1-beta
 
 **51 automated checks passed**, including the 37 baseline checks. Full output is
 in `Tests/test-results.txt`.
