@@ -20,7 +20,7 @@ PASS Owned listings excluded from execution
 PASS Commodity ownership reduces available quantity
 PASS Moving-average accounting excludes unknown basis
 PASS Invoices are observed, deduped and not auto-booked
-50k scan job ticks: 598; synthetic-budget elapsed ms: 1113
+50k scan job ticks: 599; synthetic-budget elapsed ms: 1113
 PASS 50,000 rows process across frames; malformed row isolated
 PASS Oversized price distribution retains history and blocks trading
 PASS UI builds and every terminal tab renders
@@ -36,4 +36,18 @@ PASS Aborted commodity quote enforces a stale-event guard
 PASS Expired/cancelled mailbox subjects are observations, not sales
 PASS Reviewed actual sales feed future fair value conservatively
 PASS Winning bid is used instead of advertised buyout; payout checked
-ALL 37 TESTS PASSED
+PASS Full scan survives old 25s limit and completes from replicate event
+PASS Full scan 60s timeout retains request without retry; late event recovers
+PASS Empty response is diagnosed and never publishes empty market data
+PASS Invalid replicate counts wait for valid data and record count error
+PASS Legacy list/page event is traced without satisfying replicate request
+PASS No-event timeout differs from empty response; duplicate events do not parse twice
+PASS Late replicate recovery preserves an unrelated active search request
+PASS AH closure invalidates late recovery across reopen
+PASS AH close during full-scan parsing preserves diagnostic abort and cancels jobs
+PASS Cached analysis invalidates late full-scan recovery
+PASS Full-scan send failure is visible without retry
+PASS Full-scan event history is bounded, reports are persisted, unsolicited cache not consumed
+PASS Full scan response deadline starts at send, not queue entry
+PASS New queued full scan invalidates earlier late-response correlation
+ALL 51 TESTS PASSED

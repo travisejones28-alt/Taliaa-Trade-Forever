@@ -26,12 +26,17 @@ end
 function M:CancelRequests(reason)
   local q=self.queue; local old=q.active; q.active=nil; q.dedupe={}
   local waiting=q.waiting; q.waiting={}; self:CancelJob('results')
+  if q.lateReplicate then
+    if q.lateReplicate.fail then q.lateReplicate.fail(reason) end
+    q.lateReplicate=nil
+  end
   if old and old.fail then old.fail(reason) end
   for _,r in ipairs(waiting) do if r.fail then r.fail(reason) end end
 end
 function M:SendAHRequest(r)
   local A=C_AuctionHouse
   if r.kind=='replicate' then
+    self:FullScanSent(r)
     self.db.lastFreshScanRequestAt=time(); A.ReplicateItems()
   elseif r.kind=='owned' then A.QueryOwnedAuctions({})
   elseif r.kind=='browse' then A.SendBrowseQuery(r.query)
@@ -51,8 +56,18 @@ end
 function M:PumpQueue()
   local q=self.queue; if not self:CanUseAuctionHouse() then return end
   local r=q.active
-  if r and GetTime()-r.at>90 then self:FinishRequest(r,false,'Request total deadline exceeded'); return end
-  if r and GetTime()-r.sent>r.timeout then
+  if r and r.kind=='replicate' then
+    local elapsed=GetTime()-r.sent
+    if elapsed>=180 then
+      if not r.timedOut then r.timedOut=true; q.stats.timeouts=q.stats.timeouts+1 end
+      q.lateReplicate=r -- keep correlation until AH close, cached analysis or a new full scan
+      self:FinishRequest(r,false,self:FullScanTimeoutReason(r)); return
+    elseif elapsed>=r.timeout and not r.timedOut then
+      r.timedOut=true; q.stats.timeouts=q.stats.timeouts+1
+      self:FullScanSlow(r)
+    end
+  elseif r and GetTime()-r.at>90 then self:FinishRequest(r,false,'Request total deadline exceeded'); return
+  elseif r and GetTime()-r.sent>r.timeout then
     q.stats.timeouts=q.stats.timeouts+1
     if r.kind~='replicate' and r.attempt<2 and not r.reading then
       r.attempt=r.attempt+1; r.sent=GetTime(); r.resend=true; q.stats.retries=q.stats.retries+1
@@ -75,7 +90,7 @@ function M:PumpQueue()
     r=nil
   end
   if not r then return end
-  q.active=r; r.sent=GetTime(); r.timeout=r.kind=='replicate' and 25 or 15; r.attempt=1
+  q.active=r; r.sent=GetTime(); r.timeout=r.kind=='replicate' and 60 or 15; r.attempt=1
   local ok,err=pcall(self.SendAHRequest,self,r)
   if not ok then self:FinishRequest(r,false,tostring(err)) else q.stats.sent=q.stats.sent+1 end
 end
@@ -139,11 +154,6 @@ end
 for _,event in ipairs({'ITEM_SEARCH_RESULTS_UPDATED','ITEM_SEARCH_RESULTS_ADDED','COMMODITY_SEARCH_RESULTS_UPDATED','COMMODITY_SEARCH_RESULTS_ADDED'}) do
   M:RegisterHandler(event,function(self,e,key) self:ReadSearch(e,key) end)
 end
-M:RegisterHandler('REPLICATE_ITEM_LIST_UPDATE',function(self)
-  local r=self.queue.active; if not r or r.kind~='replicate' then return end
-  local ok,n=pcall(C_AuctionHouse.GetNumReplicateItems)
-  if ok and tonumber(n) and n>=0 then self:FinishRequest(r,true,n) else self:FinishRequest(r,false,'Invalid replicate count') end
-end)
 M:RegisterHandler('OWNED_AUCTIONS_UPDATED',function(self)
   local r=self.queue.active; if r and r.kind=='owned' then self:FinishRequest(r,true,true) end
 end)

@@ -290,4 +290,98 @@ check('Winning bid is used instead of advertised buyout; payout checked',functio
  M:ObserveMail();jobs();e=M.db.ledger[#M.db.ledger];assert(not e.invoiceVerified)
  GetInboxInvoiceInfo=oldInvoice;GetInboxHeaderInfo=oldHeader
 end)
+local function freshScan(rows)
+ resetQueue();M.scanState.running=false;M.scanState.phase='idle';replicateRows=rows or 0
+ M.db.lastFreshScanRequestAt=0;M:RequestFreshScan();M:PumpQueue()
+ assert(M.queue.active and M.queue.active.kind=='replicate');return M.db.fullScanDiagnostic
+end
+check('Full scan survives old 25s limit and completes from replicate event',function()
+ local d=freshScan(100);local old=M.db.latestScan
+ advance(42);M:PumpQueue();assert(M.queue.active and #calls==1 and M.db.latestScan==old)
+ emit('REPLICATE_ITEM_LIST_UPDATE');assert(not M.queue.active and M.scanState.phase=='processing');jobs()
+ assert(d.phase=='done' and d.responseSeconds==42 and d.responseRows==100 and d.baselineRows==100)
+ assert(d.parseStartedAt and d.parseFinishedAt and d.completedAt and M.db.latestScan.rawRows==100)
+end)
+check('Full scan 60s timeout retains request without retry; late event recovers',function()
+ local d=freshScan();local before=M.queue.stats.timeouts
+ advance(61);M:PumpQueue();assert(M.queue.active and M.scanState.running and d.phase=='waiting-late')
+ assert(#calls==1 and M.queue.stats.timeouts==before+1);advance(10);M:PumpQueue();assert(M.queue.stats.timeouts==before+1)
+ replicateRows=100;emit('REPLICATE_ITEM_LIST_UPDATE');jobs();assert(d.phase=='done' and d.responseSeconds==71)
+end)
+check('Empty response is diagnosed and never publishes empty market data',function()
+ local d=freshScan();local old=M.db.latestScan;local lastSuccess=M.db.lastSuccessfulScanAt
+ emit('REPLICATE_ITEM_LIST_UPDATE');assert(M.queue.active and d.lastReplicateRows==0 and not M.jobs.scan)
+ advance(181);M:PumpQueue();assert(not M.queue.active and M.queue.lateReplicate and not M.scanState.running)
+ assert(d.error:find('only empty results',1,true) and M.db.latestScan==old and M.db.lastSuccessfulScanAt==lastSuccess)
+ replicateRows=100;emit('REPLICATE_ITEM_LIST_UPDATE');jobs();assert(d.phase=='done' and d.recoveredLate and not M.queue.lateReplicate)
+end)
+check('Invalid replicate counts wait for valid data and record count error',function()
+ local d=freshScan();local saved=C_AuctionHouse.GetNumReplicateItems
+ C_AuctionHouse.GetNumReplicateItems=function() error('not ready') end
+ emit('REPLICATE_ITEM_LIST_UPDATE');assert(M.queue.active and d.lastCountError and not M.jobs.scan)
+ C_AuctionHouse.GetNumReplicateItems=function() return -1 end
+ emit('REPLICATE_ITEM_LIST_UPDATE');assert(M.queue.active and d.replicateEvents==2)
+ C_AuctionHouse.GetNumReplicateItems=saved;replicateRows=100;emit('REPLICATE_ITEM_LIST_UPDATE');jobs();assert(d.phase=='done')
+end)
+check('Legacy list/page event is traced without satisfying replicate request',function()
+ local d=freshScan(100);GetNumAuctionItems=function(kind) assert(kind=='list');return 50,1234 end
+ advance(3);emit('AUCTION_ITEM_LIST_UPDATE');assert(M.queue.active and not M.jobs.scan)
+ local e=d.events[1];assert(e.listRows==50 and e.listTotal==1234 and e.elapsed==3 and d.legacyEvents==1)
+ advance(178);M:PumpQueue();assert(d.error:find('legacy list events only',1,true))
+ GetNumAuctionItems=nil;M:CancelRequests('end')
+end)
+check('No-event timeout differs from empty response; duplicate events do not parse twice',function()
+ local d=freshScan(100);advance(181);M:PumpQueue();assert(d.error:find('no replicate response',1,true))
+ emit('REPLICATE_ITEM_LIST_UPDATE');local token=M.scanToken;emit('REPLICATE_ITEM_LIST_UPDATE');assert(M.scanToken==token)
+ jobs();local seq=M.db.scanSequence;emit('REPLICATE_ITEM_LIST_UPDATE');assert(not M.jobs.scan and M.db.scanSequence==seq)
+ assert(d.eventCount==3 and d.recoveredLate and #calls==1)
+end)
+check('Late replicate recovery preserves an unrelated active search request',function()
+ local d=freshScan(100);advance(181);M:PumpQueue();advance(0.4)
+ M:QueueRequest({id='other',kind='owned'});M:PumpQueue();local active=M.queue.active;assert(active.id=='other')
+ emit('REPLICATE_ITEM_LIST_UPDATE');assert(M.queue.active==active and d.recoveredLate)
+ jobs();emit('OWNED_AUCTIONS_UPDATED');assert(not M.queue.active and d.phase=='done')
+end)
+check('AH closure invalidates late recovery across reopen',function()
+ local d=freshScan(100);advance(181);M:PumpQueue();emit('AUCTION_HOUSE_CLOSED')
+ assert(not M.queue.lateReplicate and d.phase=='aborted' and M.scanState.phase=='aborted');emit('AUCTION_HOUSE_SHOW')
+ emit('REPLICATE_ITEM_LIST_UPDATE');assert(not M.jobs.scan and d.phase=='aborted')
+end)
+check('AH close during full-scan parsing preserves diagnostic abort and cancels jobs',function()
+ local d=freshScan(50000);emit('REPLICATE_ITEM_LIST_UPDATE');M:RunJobs();emit('AUCTION_HOUSE_CLOSED')
+ assert(d.phase=='aborted' and not M.jobs.scan and not M.jobs.model and not d.completedAt)
+ jobs();emit('AUCTION_HOUSE_SHOW')
+end)
+check('Cached analysis invalidates late full-scan recovery',function()
+ local d=freshScan(100);advance(181);M:PumpQueue();M:AnalyzeCachedSnapshot();assert(not M.queue.lateReplicate)
+ local token=M.scanToken;emit('REPLICATE_ITEM_LIST_UPDATE');assert(M.scanToken==token);jobs()
+ assert(M.db.latestScan.source=='cached snapshot' and not d.recoveredLate)
+end)
+check('Full-scan send failure is visible without retry',function()
+ resetQueue();M.scanState.running=false;M.db.lastFreshScanRequestAt=0
+ local saved=C_AuctionHouse.ReplicateItems;C_AuctionHouse.ReplicateItems=function() error('server unavailable') end
+ M:RequestFreshScan();M:PumpQueue();local d=M.db.fullScanDiagnostic
+ assert(not M.queue.active and not M.scanState.running and d.phase=='error' and d.error:find('server unavailable',1,true))
+ C_AuctionHouse.ReplicateItems=saved
+end)
+check('Full-scan event history is bounded, reports are persisted, unsolicited cache not consumed',function()
+ local d=freshScan();for i=1,30 do emit('AUCTION_ITEM_LIST_UPDATE') end
+ assert(#d.events==24 and d.eventCount==30);M:CancelRequests('end')
+ M.scanState.fullScanDiagnostic=nil;replicateRows=100;emit('REPLICATE_ITEM_LIST_UPDATE');assert(not M.jobs.scan)
+ M:InitializeDatabase();jobs();assert(M.db.fullScanDiagnostic==d)
+ local report=M:BuildTextReport();assert(report:find('FULL SCAN DIAGNOSTICS',1,true) and report:find('legacy list',1,true))
+ M:SetView('market');M:RenderUI();assert(M.content:GetText():find('FULL SCAN DIAGNOSTICS',1,true))
+end)
+check('Full scan response deadline starts at send, not queue entry',function()
+ resetQueue();M.scanState.running=false;M.db.lastFreshScanRequestAt=0;ready=false;replicateRows=100
+ M:RequestFreshScan();advance(100);M:PumpQueue();assert(not M.queue.active and #calls==0)
+ ready=true;M:PumpQueue();advance(42);M:PumpQueue();assert(M.queue.active and #calls==1)
+ emit('REPLICATE_ITEM_LIST_UPDATE');jobs();assert(M.db.fullScanDiagnostic.responseSeconds==42)
+end)
+check('New queued full scan invalidates earlier late-response correlation',function()
+ local d=freshScan(100);advance(901);M:PumpQueue();assert(M.queue.lateReplicate)
+ ready=false;M:RequestFreshScan();local new=M.db.fullScanDiagnostic
+ assert(not M.queue.lateReplicate and new~=d);emit('REPLICATE_ITEM_LIST_UPDATE');assert(not M.jobs.scan and new.eventCount==0)
+ ready=true;advance(0.4);M:PumpQueue();emit('REPLICATE_ITEM_LIST_UPDATE');jobs();assert(new.phase=='done' and not d.recoveredLate)
+end)
 print('ALL '..total..' TESTS PASSED')

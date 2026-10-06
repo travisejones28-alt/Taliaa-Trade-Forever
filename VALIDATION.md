@@ -1,4 +1,20 @@
-# Final audit — 1.0.0-beta
+# Full-scan audit — 1.0.1-beta
+
+**51 automated checks passed**, including the 37 baseline checks. Full output is
+in `Tests/test-results.txt`.
+
+New coverage: responses beyond the old 25-second limit; 60-second soft timeout
+without resend; recovery after 180 seconds; empty/invalid counts; legacy page
+tracing; no-event versus empty-result failures; duplicate events; concurrent
+unrelated requests; AH closure while waiting/parsing; cached-analysis invalidation;
+send errors; bounded persistent diagnostics; queue-delay-independent deadlines;
+and superseding a timed-out scan with a new request.
+
+The baseline 50,000-row fixture still processes across roughly 600 scheduled job ticks.
+All baseline purchase, model, accounting and UI checks pass. No in-game beta scan
+has been run in this environment. Follow the new diagnostic test in README.md.
+
+## Baseline audit — 1.0.0-beta
 
 **37 automated checks passed.** Full output is in `Tests/test-results.txt`.
 

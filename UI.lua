@@ -169,6 +169,7 @@ function M:RenderUI()
     local scan=self.db.latestScan; local stats=self.db.marketStats or {}; local totals=self:LedgerTotals()
     text='|cffffffffLOCAL MARKET TERMINAL|r\n\n'..#(self.marketIndex or {})..' markets | '..#self.db.opportunities..' ranked candidates\nEconomy: '..self.economyID..'\n\n'
     if scan then text=text..string.format('Last scan %s\nRows %d | valid %d | invalid %d | incomplete %d\nMarkets %d | total supply %d | elapsed %s ms | generation #%s\n\n',date('%Y-%m-%d %H:%M',scan.completedAt or time()),scan.rawRows or 0,scan.auctionsProcessed or 0,scan.invalidRecords or 0,scan.incompleteRecords or 0,scan.uniqueItems or 0,scan.totalQuantity or 0,tostring(scan.processingMS),tostring(scan.marketScanID)) end
+    text=text..self:BuildFullScanReport()..'\n\n'
     text=text..'Tracked inventory cost '..self:Money(totals.inventory)..' | reserved orders '..self:Money(totals.reserved)..'\nCost-matched realized result '..self:Money(totals.realized)..' | net sale revenue '..self:Money(totals.revenue)..'\n\nFull scans have a 15-minute safety cooldown. Cached analysis cannot increase history confidence.\nPricing blends lower-market depth and recent history. Missing markets retain their last observation.\nChoose OPPORTUNITIES, select a row, then REVALIDATE before considering EXECUTE.\nSelling and cancel/repost analysis are advisory; use the native AH for posting/cancelling.\n/vmm report opens copyable diagnostics.'
   else
     local source,headers={},{'Name','Ask','Fair','Net','ROI','Score','Confidence','Liquidity'}

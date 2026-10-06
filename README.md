@@ -1,4 +1,4 @@
-# VoidMark Market 1.0.0-beta
+# VoidMark Market 1.0.1-beta
 
 A testable Forever auction terminal built from the supplied working prototype.
 **This build has automated mock validation, but has not run inside the Forever client.**
@@ -169,6 +169,35 @@ and constraints; their source and frameworks are not bundled or merged.
 library, or run the Lua harness with a compatible Lua interpreter from this folder.
 The test harness is not loaded by the TOC. See `VALIDATION.md` for scope and results.
 
-Destination requested: `travisejones28-alt/VoidMark-Market`. GitHub returned HTTP 404
-through the authorized connector; no remote commit/push was made and no other
-VoidMark repository was modified.
+Repository: https://github.com/travisejones28-alt/VoidMark-Market
+
+## 1.0.1-beta full-scan diagnostic test
+
+The scanner uses `C_AuctionHouse.ReplicateItems`, not a legacy `QueryAuctionItems`
+getAll request. The old 25-second response cutoff discarded the request even
+though the 15-minute cooldown had already started.
+
+- Full scans now wait 60 seconds, then keep the request active through 180 seconds
+  without retrying it. Other search and transaction behavior is unchanged.
+- After 180 seconds the queue is released, but a late replicate event can still
+  recover the abandoned request during the same open AH session. Closing the AH,
+  starting cached analysis, starting another full scan or reloading ends recovery.
+- An empty or invalid replicate count is logged and does not publish an empty
+  successful scan. Previously saved market history remains available.
+- The Market tab and Diagnostics/report show the last request, pre-request cached
+  count, response delay and count, parse start/finish, processing time and errors.
+  The last 24 event records and total counters persist in SavedVariables.
+- `REPLICATE_ITEM_LIST_UPDATE` is the accepted response. Legacy
+  `AUCTION_ITEM_LIST_UPDATE` events are traced with `GetNumAuctionItems("list")`
+  batch/total counts when that optional API exists, but are not consumed as a
+  full replicate snapshot. An unchanged row count alone is not evidence of stale
+  data; a nonempty replicate event is required, rather than polling cached counts.
+- Duplicate events do not restart parsing. Processing remains frame-budgeted.
+
+Update the addon, `/reload`, keep Safe Mode on and open the AH. Once the cooldown
+ends, click FULL SCAN once and keep the AH open for at least three minutes if it
+has not completed. Then use `/vmm report` and copy the diagnostics, even if the
+scan fails. The report distinguishes no replicate event, legacy events only,
+empty results, invalid counts, successful parsing and recovered late responses.
+This is a diagnostic fix validated with mocks; live beta response behavior still
+needs this test.
